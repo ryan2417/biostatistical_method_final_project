@@ -1,0 +1,256 @@
+---
+title: "Final Project"
+author: "KaiYu He(kh3074)"
+date: "12/11/2021"
+output: github_document
+---
+
+```{r}
+library(tidyverse)
+library(skimr)
+library(patchwork)
+library(MASS)
+library(leaps)
+library(mgcv)
+library(performance)
+```
+
+```{r}
+# data clean (calculate crime_rate (1000 people))
+crime_rate_df = read_csv("data/cdi.csv") %>%
+  mutate(crime_rate = crimes /(pop/1000),
+         region = case_when(
+    region == 1 ~ "Northeast",
+    region == 2 ~ "North Central",
+    region == 3 ~ "South",
+    region == 4 ~ "West"
+  ),
+  region = factor(region))
+# check outliers
+OutVals = boxplot(crime_rate_df$crime_rate)$out
+```
+
+```{r}
+crime_rate_df %>% 
+  dplyr::filter(crime_rate %in% OutVals) %>% 
+  dplyr::select(state, crime_rate, cty) %>% 
+  knitr::kable(caption = "Outliers in Crime Rate")
+
+crime_rate_df %>% 
+  group_by(region) %>% 
+  count() %>% 
+  knitr::kable(caption = "Number of Observations in Each Region") 
+
+# numeric variables
+crime_rate_df_numeric  =
+  crime_rate_df%>%
+  dplyr::select(area,pop18,pop65,docs,beds,hsgrad,bagrad,poverty,unemp,
+                pcincome,totalinc,crime_rate)%>%
+  filter(beds<10000,docs<10000)
+
+# marginal distribution
+crime_rate_df_numeric %>%
+  pivot_longer(area:crime_rate,names_to = "predictors",values_to = "value")%>%
+  ggplot(aes(x = value))+
+  geom_density()+
+  facet_wrap(.~predictors,scales = "free") + 
+  labs(
+    title = "Figure 2: Marginal Distribution of Numerical Variables"
+  )
+
+## Variable Selection
+# numerical variables
+crime_rate_df %>%
+  dplyr::select(crime_rate,area,pop18,pop65,docs,beds,hsgrad,bagrad,
+                poverty,unemp,totalinc,pcincome) %>%
+  pivot_longer(area:pcincome, names_to = "predictor", values_to = "value") %>%
+  ggplot(aes(x = value, y = crime_rate)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = F) +
+  facet_wrap(.~predictor, scales = "free") +
+  labs(title = "Figure 3: Scatterplots of crime rate vs. numerical predictor variables",
+       x = "Predictor Variable",
+       y = "Crime Rate Per 1000 People")
+
+#categorical variable
+crime_rate_df%>%
+  ggplot(aes(x = fct_reorder(region,crime_rate),y=crime_rate))+
+  geom_boxplot() + 
+  labs(
+    title = "Figure 4: Boxplot of Crime Rate over Region",
+    x = "Region",
+    y = "Crime Rate per 1000 People"
+  )
+
+crime_rate_df_all = crime_rate_df %>%
+  dplyr::select(crime_rate,pop18,docs,beds,poverty,totalinc,region)
+
+#interaction term
+crime_rate_df_all %>%
+  pivot_longer(pop18:totalinc, names_to = "predictor", values_to = "value") %>%
+  ggplot(aes(x = value,y = crime_rate,color = region)) +
+  geom_point() +
+  geom_smooth(method = "lm",se = F) +
+  facet_wrap(.~predictor, scales = "free") +
+  labs(
+    title = "Figure 5: Interaction Check",
+    y = "Crime Rate"
+  )
+```
+
+
+```{r}
+#stepwise procedure with AIC and BIC
+lm0 = lm(data = crime_rate_df_all, crime_rate ~ pop18 + docs + beds + 
+           poverty + totalinc + region + docs*region + beds*region + 
+           poverty*region + totalinc*region)
+
+step(lm0 , direction = "backward", scope = ~pop18 + docs + beds +
+       poverty + totalinc + region + docs*region + beds*region + 
+       poverty*region + totalinc*region)
+lm1_AIC_Backward = lm(formula = crime_rate ~ pop18 + docs + beds +
+                        poverty + totalinc + region + docs:region +
+                        poverty:region + totalinc:region, 
+    data = crime_rate_df_all)
+
+lm_null = lm(crime_rate ~ NULL, data = crime_rate_df_all)
+
+step(lm_null,direction = "forward", scope = ~pop18 + docs + beds +
+       poverty + totalinc + region + docs*region + beds*region +
+       poverty*region + totalinc*region)
+
+lm2_AIC_Forward = lm(formula = crime_rate ~ poverty + beds + region + 
+                       pop18 + docs + beds:region + poverty:region +
+                       region:docs, data = crime_rate_df_all)
+
+step(lm_null,direction = "both", scope = ~pop18 + docs + beds +
+       poverty + totalinc + region + docs*region + beds*region +
+       poverty*region + totalinc*region)
+
+lm3_AIC_Both = lm(formula = crime_rate ~ poverty + beds + region +
+                    pop18 + docs + 
+    beds:region + region:docs, data = crime_rate_df_all)
+
+step(lm_null,direction = "forward", k = log(nrow(crime_rate_df)), 
+     scope = ~pop18 + docs + beds + poverty + totalinc + region + 
+       docs*region + beds*region + poverty*region + totalinc*region)
+
+lm4_BIC_Forward_Both = lm(formula = crime_rate ~ poverty + beds + region +
+                            pop18 + beds:region, 
+    data = crime_rate_df_all)
+```
+
+
+
+```{r}
+
+library(modelr)
+set.seed(1200)
+#cross-validation
+cv_df <-
+  crossv_mc(crime_rate_df_all, 500)
+cv_df <-
+  cv_df %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+
+cv_df_result <-
+  cv_df %>% 
+  mutate(
+    lm1_AIC_Backward = map(.x = train, ~lm(crime_rate ~ pop18 +
+                                             docs + beds + poverty + 
+                                             totalinc + region + docs:region +
+                                             poverty:region + totalinc:region,
+                                           data = .x)),
+    lm2_AIC_Forward = map(.x = train, ~lm(crime_rate ~ pop18 + docs +
+                                            beds + poverty + totalinc + 
+    region + docs:region + beds:region + poverty:region + totalinc:region,
+    data = .x, )),
+    lm3_AIC_Both = map(.x = train, ~lm(crime_rate ~ poverty + beds + region +
+                                         pop18 + docs + 
+    beds:region + region:docs, data = crime_rate_df_all)),
+    lm4_BIC_Forward_Both = map(.x = train, ~lm(crime_rate ~ poverty + beds +
+                                                 region + pop18 + beds:region,
+                                               data = .x))
+    ) %>% 
+  mutate(
+    rmse_AIC_Backward = map2_dbl(.x = lm1_AIC_Backward,
+                                 .y = test, 
+                                 ~rmse(model = .x, data = .y)),
+    rmse_AIC_Forward = map2_dbl(.x = lm2_AIC_Forward, .y = test,
+                                ~rmse(model = .x, data = .y)),
+    rmse_AIC_Both = map2_dbl(.x = lm3_AIC_Both, .y = test, 
+                             ~rmse(model = .x, data = .y)),
+    rmse_BIC_Forward_Both = map2_dbl(.x = lm4_BIC_Forward_Both, 
+                                     .y = test, 
+                                     ~rmse(model = .x, data = .y))
+  )
+
+cv_df_result %>% 
+  dplyr::select(starts_with("rmse")) %>% 
+  pivot_longer(
+    rmse_AIC_Backward:rmse_BIC_Forward_Both,
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) %>% 
+  ggplot(aes(x = model, y = rmse)) +
+  geom_violin() +
+  labs(
+    title = "Figure 6: Distribution of RMSPE over Candidate Models",
+    x = "Model",
+    y = "Rooted Mean Square Prediction Error"
+  )
+```
+
+```{r}
+## Model Diagnostic
+lm3_AIC_Both = lm(formula = crime_rate ~ poverty + beds + region + 
+                    pop18 + docs + 
+    beds:region + region:docs, data = crime_rate_df_all)
+
+crime_rate_df_transform = crime_rate_df_all %>% 
+  mutate(crime_rate = sqrt(crime_rate))
+
+lm3_AIC_Both_transform = lm(formula = crime_rate ~ poverty + 
+                              beds + region + pop18 + docs + 
+    beds:region + region:docs, data = crime_rate_df_transform)
+
+lm3_without_interaction = lm(formula = crime_rate ~ poverty + 
+                               beds + region + pop18 + docs,
+                             data = crime_rate_df_all)
+```
+
+
+```{r}
+#transformation
+par(mfrow = c(2,3))
+boxcox(lm3_AIC_Both)
+title("Before Transformation")
+plot(lm3_AIC_Both ,which = 1)
+plot(lm3_AIC_Both ,which = 2)
+boxcox(lm3_AIC_Both_transform)
+title("After Transformation")
+plot(lm3_AIC_Both_transform,which = 1)
+plot(lm3_AIC_Both_transform,which = 2)
+
+```
+
+```{r}
+#influential points
+plot(lm3_AIC_Both_transform,which = 4,sub.caption = "")
+title("Figure 8: Cook's Distance to Check Influential Points")
+```
+
+
+```{r eval}
+#multicolinearity
+check_collinearity(lm3_without_interaction) %>% 
+  knitr::kable(caption = "Table 3: Multicolinearity Check")
+```
+
+
+
+
